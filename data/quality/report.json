@@ -1,0 +1,123 @@
+{
+  "checks": [
+    {
+      "name": "identical_duplicate_shipment_id",
+      "rows_affected": 16,
+      "percentage": 0.32,
+      "severity": "warning",
+      "action": "Keep one copy of each identical shipment id."
+    },
+    {
+      "name": "conflicting_duplicate_shipment_id",
+      "rows_affected": 40,
+      "percentage": 0.8,
+      "severity": "critical",
+      "action": "Quarantine every row when the same shipment id has different values."
+    },
+    {
+      "name": "unknown_port",
+      "rows_affected": 95,
+      "percentage": 1.89,
+      "severity": "critical",
+      "action": "Quarantine the shipment. The port code is not in the port file."
+    },
+    {
+      "name": "noncanonical_status",
+      "rows_affected": 146,
+      "percentage": 2.9,
+      "severity": "warning",
+      "action": "Map delivered to DELIVERED, Complete and COMPLETED to COMPLETED, blank and N/A to UNKNOWN."
+    },
+    {
+      "name": "noncanonical_cargo",
+      "rows_affected": 276,
+      "percentage": 5.49,
+      "severity": "warning",
+      "action": "Strip and map cargo to one canonical label. Leave a blank cargo null."
+    },
+    {
+      "name": "zero_container_count",
+      "rows_affected": 23,
+      "percentage": 0.46,
+      "severity": "warning",
+      "action": "Flag and keep the raw value."
+    },
+    {
+      "name": "extreme_container_count",
+      "rows_affected": 17,
+      "percentage": 0.34,
+      "severity": "warning",
+      "action": "Flag and keep the raw value. The model clips this feature at 40."
+    },
+    {
+      "name": "missing_weight",
+      "rows_affected": 73,
+      "percentage": 1.45,
+      "severity": "warning",
+      "action": "Leave the weight null."
+    },
+    {
+      "name": "negative_weight",
+      "rows_affected": 36,
+      "percentage": 0.72,
+      "severity": "warning",
+      "action": "Set the weight to null."
+    },
+    {
+      "name": "missing_actual_timestamps",
+      "rows_affected": 349,
+      "percentage": 6.94,
+      "severity": "warning",
+      "action": "Keep both timestamps null. Do not impute them."
+    },
+    {
+      "name": "actual_departure_before_booking",
+      "rows_affected": 39,
+      "percentage": 0.78,
+      "severity": "warning",
+      "action": "Flag and keep the timestamps."
+    },
+    {
+      "name": "early_arrival",
+      "rows_affected": 950,
+      "percentage": 18.89,
+      "severity": "info",
+      "action": "none"
+    },
+    {
+      "name": "missing_port_country",
+      "rows_affected": 1,
+      "percentage": 4.0,
+      "severity": "warning",
+      "action": "Flag the blank country. Do not fill a value that is not in the file."
+    },
+    {
+      "name": "conflicting_event_id",
+      "rows_affected": 206,
+      "percentage": 0.82,
+      "severity": "critical",
+      "action": "Quarantine every row with that event id. Do not pick a winner."
+    },
+    {
+      "name": "blank_event_type",
+      "rows_affected": 140,
+      "percentage": 0.56,
+      "severity": "warning",
+      "action": "Keep the row and store a null event type."
+    },
+    {
+      "name": "blank_event_notes",
+      "rows_affected": 1913,
+      "percentage": 7.65,
+      "severity": "info",
+      "action": "Allow a null note."
+    },
+    {
+      "name": "sentinel_vessel",
+      "rows_affected": 207,
+      "percentage": 0.83,
+      "severity": "warning",
+      "action": "Flag and keep the event. The vessel is not on a shipment."
+    }
+  ]
+}

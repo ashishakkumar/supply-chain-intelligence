@@ -1,0 +1,1 @@
+"""Booking-time delay model."""
