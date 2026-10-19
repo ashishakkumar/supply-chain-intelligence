@@ -147,7 +147,3 @@ What breaks first is the full-table reload. Two API processes must not run it. T
 At 100 times the current volume, Postgres stays. Add the route and booking indexes only if a query shows up slow; those two indexes are already there. Offset pagination gets expensive; switch the list endpoint to a keyset on `shipment_id`.
 
 At millions of shipments, 24 hours a day: partition `port_events` by month, keep scoring on a copy of the model loaded in the API process, and retrain offline. The model file is loaded at startup, not on each request. A new port code is ignored by the one-hot encoder and is a reason to retrain. The assistant stays a client of the API for predictions so a model failure is a 503, not a number invented in the prompt.
-
-## Where generated code was used
-
-An AI coding assistant drafted the implementation from a written design. The choices that were specified, rather than left to the draft, were Postgres, LangGraph with a five-call cap, ChatOpenAI behind `OPENAI_BASE_URL`, a booking-date evaluation split, quarantine for conflicting rows, and leaving Antwerp's country blank because it is not in the file.
