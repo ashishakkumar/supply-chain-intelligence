@@ -50,14 +50,14 @@ flowchart LR
   pg[(Postgres)]
   api[FastAPI]
   model[joblib model]
-  graph[LangGraph CLI]
+  assistant[LangGraph CLI]
   csvs --> dq
   csvs --> pipe
   pipe --> pg
   api --> pg
   api --> model
-  graph --> pg
-  graph -->|predict_delay only| api
+  assistant --> pg
+  assistant -->|predict_delay only| api
 ```
 
 Raw files are never modified. One command, `python -m app.pipeline`, replaces the curated tables and the quarantine tables in a single transaction. The API reads those tables. `query_shipments` and `get_route_stats` read the same tables. Only `predict_delay` calls the HTTP endpoint.
