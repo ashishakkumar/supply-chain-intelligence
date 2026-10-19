@@ -1,0 +1,15 @@
+{
+  "precision": 0.4105504587155963,
+  "recall": 0.49175824175824173,
+  "f1": 0.4475,
+  "auc": 0.5147797156971469,
+  "base_rate": 0.4004400440044004,
+  "confusion": {
+    "true_negative": 288,
+    "false_positive": 257,
+    "false_negative": 185,
+    "true_positive": 179
+  },
+  "sklearn_version": "1.9.1",
+  "model_version": "logreg-v1"
+}

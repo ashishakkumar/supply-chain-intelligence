@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: sci
+      POSTGRES_PASSWORD: sci
+      POSTGRES_DB: sci
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sci -d sci"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://sci:sci@postgres:5432/sci
+      APP_VERSION: "0.1.0"
+      DATA_DIR: /app/data/raw
+      MODEL_PATH: /app/models/delay_model.joblib
+    depends_on:
+      postgres:
+        condition: service_healthy
