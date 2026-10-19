@@ -69,7 +69,7 @@ Postgres is more machinery than 5,000 shipments need. It is here for foreign key
 Other choices:
 
 - FastAPI, because the service is a handful of JSON endpoints.
-- scikit-learn logistic regression with `class_weight="balanced"`. The held-out metrics are weak on purpose of the features, and they are reported as measured: precision 0.41, recall 0.49, F1 0.45, AUC 0.51 on the latest 20% of bookings. A fancier model would not change the method.
+- scikit-learn logistic regression with `class_weight="balanced"`. The held-out score is weak because those booking-time features carry little signal, and the metrics are reported as measured: precision 0.41, recall 0.49, F1 0.45, AUC 0.51 on the latest 20% of bookings. A fancier model would not change the method.
 - ChatOpenAI pointed at `OPENAI_BASE_URL`. Cost per query is that endpoint's price for the tokens recorded in `logs/llm_calls.jsonl`. There is no fixed vendor price in this repo.
 - pytest for unit tests and for HTTP tests against a real server. ruff for lint. GitHub Actions for CI.
 - No UI, no auth, no Alembic, no Kafka, no vector store, no LangSmith, no Kubernetes. The curated schema is created from the SQLAlchemy models because this volume is rebuilt from the files.
