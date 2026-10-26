@@ -8,7 +8,20 @@ A small HTTP service over three shipment CSVs: data-quality checks, a curated Po
 docker compose up --build
 ```
 
-The API listens on port 8000. Postgres is published on port 5432 (`sci` / `sci`, database `sci`). The API container does not need a model API key.
+The API listens on port 8000. Postgres is published on port 5432 (`sci` / `sci`, database `sci`). The API container does not need a model API key. Startup creates any missing tables. It does not load or empty them. `docker compose down` keeps the Postgres rows. `docker compose down -v` removes them.
+
+Seed an empty database from `data/raw`. On the host, `DATABASE_URL` is `postgresql+psycopg://sci:sci@localhost:5432/sci`. A second run does not change rows. Restarting the API does not load or empty the tables.
+
+```bash
+uv run db-migrate
+uv run db-seed
+```
+
+The same seed from inside the running API container:
+
+```bash
+docker compose exec api uv run db-seed
+```
 
 ```bash
 curl -s localhost:8000/health
@@ -21,13 +34,12 @@ curl -s localhost:8000/data-quality/report
 Quality checks read the CSVs and do not need Postgres:
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -r requirements-dev.txt
-python -m app.dq --input data/raw
-pytest
+uv sync --group dev
+uv run python -m app.dq --input data/raw
+uv run pytest
 ```
 
-The assistant runs on the host. Copy `.env.example` to `.env` and set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` to your ChatOpenAI-compatible endpoint.
+The assistant runs on the host. Copy `.env.example` to `.env` and set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` to your ChatOpenAI-compatible endpoint. A plain invocation does not keep chat context. Pass the same `--thread` value to continue that thread only. `--debug` is optional.
 
 ```bash
 export DATABASE_URL=postgresql+psycopg://sci:sci@localhost:5432/sci
@@ -35,7 +47,9 @@ export API_BASE_URL=http://localhost:8000
 export OPENAI_API_KEY=...
 export OPENAI_BASE_URL=...
 export OPENAI_MODEL=...
-python -m app.assistant "Which routes have had the highest average delay this quarter?"
+uv run assistant "Which routes have had the highest average delay this quarter?"
+uv run assistant --thread cli "Which routes have had the highest average delay this quarter?"
+uv run assistant --thread cli "What did I just ask?"
 ```
 
 "This quarter" is the latest quarter of `booking_date` in the file (2025 Q4, bookings through 14 Oct 2025), not the wall clock. The tool returns that window, and the answer should name it.
@@ -50,29 +64,29 @@ flowchart LR
   pg[(Postgres)]
   api[FastAPI]
   model[joblib model]
-  graph[LangGraph CLI]
+  assistant[LangGraph CLI]
   csvs --> dq
   csvs --> pipe
   pipe --> pg
   api --> pg
   api --> model
-  graph --> pg
-  graph -->|predict_delay only| api
+  assistant --> pg
+  assistant -->|predict_delay only| api
 ```
 
-Raw files are never modified. One command, `python -m app.pipeline`, replaces the curated tables and the quarantine tables in a single transaction. The API reads those tables. `query_shipments` and `get_route_stats` read the same tables. Only `predict_delay` calls the HTTP endpoint.
+Raw files are never modified. `uv run db-seed` fills an empty database from `data/raw` in one transaction. A second run does not change rows. Restarting the API does not load or empty the tables. The API reads those tables. `query_shipments` and `get_route_stats` read the same tables. Only `predict_delay` calls the HTTP endpoint.
 
 ## Tech choices
 
-Postgres is more machinery than 5,000 shipments need. It is here for foreign keys, check constraints, and one server shared by the API and the assistant. At 100 times the volume the same database still fits. At millions of events, partition `port_events` by month and stop wiping the tables on every boot. DuckDB would have been the smaller query engine. It would not have given the API a shared server with constraints.
+Postgres is more machinery than 5,000 shipments need. It is here for foreign keys, check constraints, and one server shared by the API and the assistant. At 100 times the volume the same database still fits. At millions of events, partition `port_events` by month. DuckDB would have been the smaller query engine. It would not have given the API a shared server with constraints.
 
 Other choices:
 
 - FastAPI, because the service is a handful of JSON endpoints.
-- scikit-learn logistic regression with `class_weight="balanced"`. The held-out metrics are weak on purpose of the features, and they are reported as measured: precision 0.41, recall 0.49, F1 0.45, AUC 0.51 on the latest 20% of bookings. A fancier model would not change the method.
+- scikit-learn logistic regression with `class_weight="balanced"`. The held-out score is weak because those booking-time features carry little signal, and the metrics are reported as measured: precision 0.41, recall 0.49, F1 0.45, AUC 0.51 on the latest 20% of bookings. A fancier model would not change the method.
 - ChatOpenAI pointed at `OPENAI_BASE_URL`. Cost per query is that endpoint's price for the tokens recorded in `logs/llm_calls.jsonl`. There is no fixed vendor price in this repo.
 - pytest for unit tests and for HTTP tests against a real server. ruff for lint. GitHub Actions for CI.
-- No UI, no auth, no Alembic, no Kafka, no vector store, no LangSmith, no Kubernetes. The curated schema is created from the SQLAlchemy models because this volume is rebuilt from the files.
+- No UI, no auth, no Alembic, no Kafka, no vector store, no LangSmith, no Kubernetes. The curated schema is created from the SQL files in `db/migrations`. The classes in `app/db.py` map those tables. The API process does not load or empty them.
 
 `late_score` is a ranking score, not a calibrated probability. `class_weight="balanced"` reweights the loss, and the decision threshold stays at 0.5.
 
@@ -116,38 +130,34 @@ After a deployment, `GET /health` returns 200 with a version and `checks.databas
 
 Likely failures:
 
-- The loader crashes and the container exits. The previous snapshot remains, because the load is one transaction. Start the container again. The usual cause is Postgres not ready or a check constraint rejecting a row the cleaner should have removed.
+- `uv run db-seed` crashes. The insert rolls back, so a failed first seed leaves the tables empty. Run the command again. Restarting the API does not load or empty the tables. The usual cause is Postgres not ready or a check constraint rejecting a row the cleaner should have removed.
 - `POST /predict-delay` returns 503. The artefact is missing or was saved with a different scikit-learn than the pinned `1.9.1`. The process still starts.
 - The assistant times out on `OPENAI_BASE_URL` while `/health` stays up. The API does not call that endpoint. Check the key, the base URL, and `logs/llm_calls.jsonl`.
 
-A bad local release is the previous git revision and `docker compose up --build`. A deployed rollback is the previous image tag. The loader is not part of that story once it is a separate job: a second API replica must not run it, because the reload takes an exclusive lock.
+A bad local release is the previous git revision and `docker compose up --build`. A deployed rollback is the previous image tag. Restarting the API does not load or empty the tables.
 
-Next for a real deployment: a metrics endpoint and an alert on `/health` database `down` and on predict 503 rate, secrets in a secret store rather than an env file, and the loader moved out of the API process.
+Next for a real deployment: a metrics endpoint and an alert on `/health` database `down` and on predict 503 rate, and secrets in a secret store rather than an env file.
 
 ## CI/CD
 
-`.github/workflows/ci.yml` installs pinned dependencies, runs ruff, runs the full pytest suite against a Postgres service container, and builds the image in a separate job. Integration tests fail if `DATABASE_URL` is unset. The image does not copy `.env`.
+`.github/workflows/ci.yml` installs pinned dependencies with uv, runs ruff, runs the full pytest suite against a Postgres service container, and builds the image in a separate job. Integration tests fail if `DATABASE_URL` is unset. The image does not copy `.env`.
 
 After the private repository exists, add this badge, with the real owner and name:
 
 ```markdown
-[![CI](https://github.com/ashishak2/supply-chain-intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/ashishak2/supply-chain-intelligence/actions/workflows/ci.yml)
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
 ```
 
 Quality gates: ruff and pytest pass before merge. The image build passes before a release tag is cut. A change reaches a running service by building the image from the merged commit and replacing the running container. Rollback is the previous image tag, as in the runbook.
 
 ## If I had more time
 
-Move the loader to a one-shot job that swaps staging tables in, so a restart of the API does not rewrite the data. Add a time-based backfill for events instead of a full wipe. Calibrate `late_score` so it can be read as a probability.
+Add a time-based backfill for events. Calibrate `late_score` so it can be read as a probability.
 
 ## Scaling to production
 
-What breaks first is the full-table reload. Two API processes must not run it. The lock pauses reads, and at millions of event rows the pause becomes an outage. Replace it with a load into staging tables and a rename. Treat `port_events` as an append-only feed. `event_id` cannot be the idempotency key: 206 rows share an id with a different payload.
+A full-table reload is what would break first. Two processes must not run it. The lock pauses reads, and at millions of event rows the pause becomes an outage. Replace it with a load into staging tables and a rename. Treat `port_events` as an append-only feed. `event_id` cannot be the idempotency key: 206 rows share an id with a different payload.
 
 At 100 times the current volume, Postgres stays. Add the route and booking indexes only if a query shows up slow; those two indexes are already there. Offset pagination gets expensive; switch the list endpoint to a keyset on `shipment_id`.
 
 At millions of shipments, 24 hours a day: partition `port_events` by month, keep scoring on a copy of the model loaded in the API process, and retrain offline. The model file is loaded at startup, not on each request. A new port code is ignored by the one-hot encoder and is a reason to retrain. The assistant stays a client of the API for predictions so a model failure is a 503, not a number invented in the prompt.
-
-## Where generated code was used
-
-An AI coding assistant drafted the implementation from a written design. The choices that were specified, rather than left to the draft, were Postgres, LangGraph with a five-call cap, ChatOpenAI behind `OPENAI_BASE_URL`, a booking-date evaluation split, quarantine for conflicting rows, and leaving Antwerp's country blank because it is not in the file.

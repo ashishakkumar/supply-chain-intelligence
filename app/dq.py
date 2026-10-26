@@ -1,3 +1,14 @@
+"""Standalone data-quality checks and the curated-row builders.
+
+Runnable without Postgres: python -m app.dq --input data/raw
+writes data/quality/report.json. GET /data-quality/report calls build_report
+on the same CSVs. The checks do not insert anything.
+
+curate_ports, curate_shipments, and curate_events apply the decisions in that
+report when the seed runs: quarantine the critical rows, fix the warning rows
+we chose to fix, and flag-and-keep the rest by storing the cleaned value.
+"""
+
 import argparse
 import csv
 import json
@@ -38,6 +49,16 @@ def build_report(
     ports: list[dict[str, str]],
     events: list[dict[str, str]],
 ) -> list[dict[str, object]]:
+    """One record per DQ issue: name, rows, percentage, severity, action.
+
+    Percentages use the file the check belongs to (shipments, ports, or events),
+    not a mix of the three. Severity is critical, warning, or info.
+    Critical means quarantine. Warning means fix or flag-and-keep. Info means
+    leave it (early arrival is a real early ship; blank notes are allowed).
+
+    The twelve-plus issues the files contain are all listed here. This function
+    only counts. It does not drop, fix, or write a row.
+    """
     port_codes = {port["port_code"] for port in ports}
     shipment_total = len(shipments)
     port_total = len(ports)
@@ -167,6 +188,12 @@ def build_report(
 
 
 def curate_ports(rows: list[dict[str, str]]) -> list[dict[str, object]]:
+    """Clean ports for the curated ports table.
+
+    A blank country stays null. BEANR is the one row. Do not fill a country
+    that is not in the file. Congestion is stored as a float for the check
+    constraint and for the model features.
+    """
     return [
         {
             "port_code": row["port_code"],
@@ -184,6 +211,19 @@ def curate_shipments(
     rows: list[dict[str, str]],
     port_codes: set[str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Split raw shipments into curated rows and quarantine rows.
+
+    Steps, in file order so a rerun keeps the same row:
+    1. Group by shipment_id.
+    2. Conflicting duplicates: quarantine every row. Do not pick a winner.
+    3. Identical duplicates: keep one copy. The extra copies are not quarantined.
+    4. Unknown origin or destination (XXTST, ZZZZZ, UNKNW, or any code missing
+       from ports): quarantine the shipment.
+    5. Otherwise clean the row: canonical status and cargo, null bad weights,
+       and the derived delay, on-time, route, and transit fields.
+
+    Returns (kept, quarantined).
+    """
     groups: dict[str, list[dict[str, str]]] = defaultdict(list)
     order: list[str] = []
     for row in rows:
@@ -212,6 +252,13 @@ def curate_events(
     rows: list[dict[str, str]],
     port_codes: set[str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Split raw port events into curated rows and quarantine rows.
+
+    Conflicting duplicate event ids: quarantine every row with that id.
+    A port code that is not in the port file: quarantine that event.
+    Blank event type and blank notes become null and the row is kept.
+    Sentinel vessels VSL-0000 and VSL-9999 are kept; the check only counts them.
+    """
     groups: dict[str, list[dict[str, str]]] = defaultdict(list)
     order: list[str] = []
     for row in rows:
@@ -237,6 +284,12 @@ def curate_events(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI for the standalone DQ step.
+
+    python -m app.dq --input data/raw
+    Optional --output, default data/quality/report.json.
+    Does not connect to Postgres and does not depend on the seed.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", default="data/quality/report.json")
@@ -256,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
+    """Read one raw CSV. Used only by the standalone command, not by the API."""
     with path.open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
 
@@ -267,6 +321,12 @@ def _check(
     severity: str,
     action: str,
 ) -> dict[str, object]:
+    """One check object for the JSON report.
+
+    percentage is rows_affected / total * 100, rounded to 2 decimals.
+    total is the row count of the file the check belongs to. An empty file
+    reports 0.0 so the command still runs.
+    """
     percentage = 0.0 if total == 0 else round(rows_affected / total * 100, 2)
     return {
         "name": name,
@@ -278,6 +338,12 @@ def _check(
 
 
 def _duplicate_rows(rows: list[dict[str, str]]) -> tuple[int, int]:
+    """Count identical vs conflicting duplicate shipment ids.
+
+    Identical: same id, same values. Warning, keep one copy.
+    Conflicting: same id, different values. Critical, quarantine both rows.
+    The counts are rows, not distinct ids.
+    """
     groups: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in rows:
         groups[row["shipment_id"]].append(row)
@@ -294,6 +360,11 @@ def _duplicate_rows(rows: list[dict[str, str]]) -> tuple[int, int]:
 
 
 def _conflicting_event_rows(rows: list[dict[str, str]]) -> int:
+    """Rows whose event_id is shared with a different payload.
+
+    Critical. Quarantine every row with that id. event_id cannot be the
+    idempotency key for a later streaming load, because these payloads differ.
+    """
     groups: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in rows:
         groups[row["event_id"]].append(row)
@@ -305,10 +376,18 @@ def _conflicting_event_rows(rows: list[dict[str, str]]) -> int:
 
 
 def _unknown_port(row: dict[str, str], port_codes: set[str]) -> bool:
+    """True when origin or destination is not a port_code in ports.csv.
+
+    The planted codes are XXTST, ZZZZZ, and UNKNW. Critical: quarantine.
+    """
     return row["origin_port"] not in port_codes or row["destination_port"] not in port_codes
 
 
 def _cargo_dirty(value: str) -> bool:
+    """True when cargo is blank, or its case or whitespace is not the canonical label.
+
+    Warning. The curated value is the canonical label. A blank stays null.
+    """
     canonical = _cargo(value)
     if canonical is None:
         return True
@@ -316,31 +395,47 @@ def _cargo_dirty(value: str) -> bool:
 
 
 def _container(row: dict[str, str]) -> int:
+    """Container count as an int. Zero and values above 40 are warnings, not drops.
+
+    The model clips the feature at 40. The curated column keeps the raw count.
+    """
     return int(float(row["container_count"]))
 
 
 def _negative_weight(value: str) -> bool:
+    """True when weight_tons is present and below zero. Warning: store null."""
     text = value.strip()
     return bool(text) and float(text) < 0
 
 
 def _missing_actuals(row: dict[str, str]) -> bool:
+    """True when both actual departure and actual arrival are blank.
+
+    Warning. Leave both null. Do not impute. Delay stays null, so the row
+    is not a training label.
+    """
     return not row["actual_departure"].strip() and not row["actual_arrival"].strip()
 
 
 def _departed_before_booking(row: dict[str, str]) -> bool:
+    """True when actual departure is earlier than booking_date.
+
+    Warning. Flag and keep the timestamps. Booking date is still the feature.
+    """
     departure = _timestamp(row["actual_departure"])
     booking = _timestamp(row["booking_date"])
     return departure is not None and booking is not None and departure < booking
 
 
 def _early(row: dict[str, str]) -> bool:
+    """True when actual arrival is before planned arrival. Info: an early ship is on time."""
     actual = _timestamp(row["actual_arrival"])
     planned = _timestamp(row["planned_arrival"])
     return actual is not None and planned is not None and actual < planned
 
 
 def _timestamp(value: str) -> datetime | None:
+    """Parse 'YYYY-MM-DD HH:MM:SS' from a CSV cell. Blank is null. No timezone."""
     text = (value or "").strip()
     if not text:
         return None
@@ -348,10 +443,17 @@ def _timestamp(value: str) -> datetime | None:
 
 
 def _status(value: str) -> str:
+    """Map a raw status onto the canonical label. Warning.
+
+    delivered -> DELIVERED. Complete and COMPLETED -> COMPLETED.
+    Blank and N/A -> UNKNOWN. Anything else -> UNKNOWN.
+    DELIVERED, DELAYED, and CANCELLED are already canonical.
+    """
     return CANONICAL_STATUS.get(value.strip().casefold(), "UNKNOWN")
 
 
 def _cargo(value: str) -> str | None:
+    """Canonical cargo label, or null when the cell is blank. Warning."""
     key = value.strip().casefold()
     if not key:
         return None
@@ -359,6 +461,7 @@ def _cargo(value: str) -> str | None:
 
 
 def _weight(value: str) -> float | None:
+    """Weight in tons. Blank and negative both become null. A positive value is kept."""
     text = value.strip()
     if not text:
         return None
@@ -369,6 +472,12 @@ def _weight(value: str) -> float | None:
 
 
 def _clean_shipment(row: dict[str, str]) -> dict[str, object]:
+    """One curated shipment, including the five derived fields.
+
+    actual_delay_hours, on_time_flag, route_key, transit_days_planned,
+    transit_days_actual. Status, cargo, and weight are the cleaned values.
+    Container count is the raw integer, including 0 and values above 40.
+    """
     actual_arrival = _timestamp(row["actual_arrival"])
     planned_arrival = _timestamp(row["planned_arrival"])
     delay = delay_hours(actual_arrival, planned_arrival)
@@ -402,6 +511,7 @@ def _clean_shipment(row: dict[str, str]) -> dict[str, object]:
 
 
 def _clean_event(row: dict[str, str]) -> dict[str, object]:
+    """One curated port event. Blank type and blank notes are null. The vessel is kept."""
     return {
         "event_id": row["event_id"],
         "event_timestamp": _timestamp(row["event_timestamp"]),
@@ -414,6 +524,11 @@ def _clean_event(row: dict[str, str]) -> dict[str, object]:
 
 
 def _quarantine(row: dict[str, str], reason: str) -> dict[str, object]:
+    """Wrap a raw CSV row with the reason it was kept out of the curated table.
+
+    reason is conflicting_shipment_id, unknown_port, or conflicting_event_id.
+    The raw dict is stored as JSON so the original values are still inspectable.
+    """
     return {"reason": reason, "raw": row}
 
 

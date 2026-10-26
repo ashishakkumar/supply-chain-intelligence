@@ -1,3 +1,8 @@
+"""Unit tests for the standalone DQ checks and the curated-row rules.
+
+These run on in-memory CSV rows. They do not need Postgres.
+"""
+
 import json
 import os
 import subprocess
@@ -11,6 +16,7 @@ PORTS = {"CNSHA", "NLRTM"}
 
 
 def shipment(**overrides: str) -> dict[str, str]:
+    """One raw shipment row. Pass a field name to plant the quality issue under test."""
     row = {
         "shipment_id": "SHP-00001",
         "customer_id": "CUST-1001",
@@ -32,6 +38,7 @@ def shipment(**overrides: str) -> dict[str, str]:
 
 
 def test_negative_weight_percent_and_empty_file() -> None:
+    """Each check records rows, percentage of that file, severity, and action. An empty file is 0 percent."""
     rows = [
         shipment(shipment_id="A", weight_tons="-1"),
         shipment(shipment_id="B"),
@@ -53,6 +60,7 @@ def test_negative_weight_percent_and_empty_file() -> None:
 
 
 def test_identical_duplicate_is_kept_once() -> None:
+    """Identical duplicate shipment ids are a warning. The curated table keeps one copy."""
     row = shipment()
     kept, quarantined = curate_shipments([row, dict(row)], PORTS)
     assert len(kept) == 1
@@ -61,6 +69,7 @@ def test_identical_duplicate_is_kept_once() -> None:
 
 
 def test_conflicting_pair_is_quarantined() -> None:
+    """Conflicting duplicate shipment ids are critical. Both rows are quarantined. Neither is kept."""
     first = shipment()
     second = shipment(cargo_type="")
     kept, quarantined = curate_shipments([first, second], PORTS)
@@ -70,6 +79,7 @@ def test_conflicting_pair_is_quarantined() -> None:
 
 
 def test_cleaning_rules_on_a_kept_row() -> None:
+    """Warning fixes on a kept row: canonical cargo and status, null negative weight, derived delay fields."""
     kept, quarantined = curate_shipments(
         [
             shipment(
@@ -93,6 +103,7 @@ def test_cleaning_rules_on_a_kept_row() -> None:
 
 
 def test_unknown_port_is_quarantined_and_not_kept() -> None:
+    """An origin or destination missing from the port file is critical and is quarantined."""
     kept, quarantined = curate_shipments(
         [shipment(origin_port="XXTST")],
         PORTS,
@@ -102,6 +113,7 @@ def test_unknown_port_is_quarantined_and_not_kept() -> None:
 
 
 def test_missing_arrival_stays_null() -> None:
+    """Missing actual timestamps stay null. Delay is null. The row is not dropped."""
     kept, _ = curate_shipments(
         [
             shipment(
@@ -120,6 +132,7 @@ def test_missing_arrival_stays_null() -> None:
 
 
 def test_completed_and_blank_status_are_not_forced_to_delivered() -> None:
+    """Complete maps to COMPLETED. A blank status maps to UNKNOWN, not DELIVERED."""
     completed, _ = curate_shipments([shipment(status="Complete")], PORTS)
     blank, _ = curate_shipments([shipment(status="N/A")], PORTS)
     assert completed[0]["status"] == "COMPLETED"
@@ -127,6 +140,7 @@ def test_completed_and_blank_status_are_not_forced_to_delivered() -> None:
 
 
 def test_blank_country_is_not_filled() -> None:
+    """A blank port country is flagged and stored as null. The file does not contain a country to copy."""
     ports = [
         {
             "port_code": "BEANR",
@@ -144,6 +158,7 @@ def test_blank_country_is_not_filled() -> None:
 
 
 def test_conflicting_event_is_dropped_and_blank_type_is_kept() -> None:
+    """Conflicting event ids are all quarantined. A blank event type is kept as null."""
     first = {
         "event_id": "EVT-1",
         "event_timestamp": "2024-06-01 00:00:00",
@@ -172,6 +187,7 @@ def test_conflicting_event_is_dropped_and_blank_type_is_kept() -> None:
 
 
 def test_real_csv_report_counts() -> None:
+    """The report against data/raw matches the counts in the data-quality summary."""
     root = Path(__file__).resolve().parents[2]
     report = _report_from_dir(root / "data" / "raw")
     counts = {item["name"]: item["rows_affected"] for item in report}
@@ -196,6 +212,7 @@ def test_real_csv_report_counts() -> None:
 
 
 def test_cli_writes_a_report_without_a_database(tmp_path: Path) -> None:
+    """python -m app.dq --input writes the JSON report and does not need a database."""
     env = os.environ.copy()
     env.pop("DATABASE_URL", None)
     output = tmp_path / "report.json"
@@ -222,9 +239,11 @@ def test_cli_writes_a_report_without_a_database(tmp_path: Path) -> None:
 
 
 def _report_from_dir(directory: Path) -> list[dict[str, object]]:
+    """Run build_report on the three CSVs in a directory. This is the same call the endpoint makes."""
     import csv
 
     def load(name: str) -> list[dict[str, str]]:
+        """Read one CSV from the fixture directory."""
         with (directory / name).open(newline="", encoding="utf-8") as handle:
             return list(csv.DictReader(handle))
 
@@ -236,5 +255,6 @@ def _report_from_dir(directory: Path) -> list[dict[str, object]]:
 
 
 def test_planned_transit_uses_dates() -> None:
+    """transit_days_planned is planned arrival minus planned departure, in days."""
     kept, _ = curate_shipments([shipment()], PORTS)
     assert kept[0]["booking_date"] == datetime(2024, 6, 1, 0, 0)

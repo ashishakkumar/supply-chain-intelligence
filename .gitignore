@@ -5,3 +5,7 @@ __pycache__/
 .ruff_cache/
 logs/
 *.pyc
+.DS_Store
+.archify/
+UPPLY-SEAPORTS.csv
+analysis.ipynb

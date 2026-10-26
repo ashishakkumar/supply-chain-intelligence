@@ -1,3 +1,5 @@
+"""Unit tests for booking-time features and the holdout. No saved artefact is retrained here except a tiny in-memory fit."""
+
 from datetime import datetime, timedelta
 
 from app.ml.features import FEATURE_COLUMNS, shipment_features
@@ -13,6 +15,7 @@ def _row(
     containers: int = 10,
     weight: float | None = 100.0,
 ) -> dict[str, object]:
+    """One labeled shipment for the feature and split tests. actual timestamps are present so a leak would be visible."""
     return {
         "shipment_id": shipment_id,
         "origin_port": origin,
@@ -32,11 +35,13 @@ def _row(
 
 
 def test_feature_list_excludes_leakage_columns() -> None:
+    """Actual departure, actual arrival, and status are not features. Using them would disqualify the model."""
     forbidden = {"actual_departure", "actual_arrival", "status", "customer_id", "vessel_id"}
     assert forbidden.isdisjoint(FEATURE_COLUMNS)
 
 
 def test_container_clip_and_null_weight() -> None:
+    """The feature clips container count at 40. A missing weight stays null for the median imputer."""
     when = datetime(2024, 6, 1)
     assert shipment_features(_row("a", when, 0, containers=40))["container_count"] == 40
     assert shipment_features(_row("b", when, 0, containers=41))["container_count"] == 40
@@ -45,6 +50,7 @@ def test_container_clip_and_null_weight() -> None:
 
 
 def test_time_split_keeps_later_bookings_in_the_test_set() -> None:
+    """The holdout is the later bookings. A row with no delay is not in either side."""
     start = datetime(2024, 1, 1)
     rows = []
     for index in range(10):
@@ -58,11 +64,13 @@ def test_time_split_keeps_later_bookings_in_the_test_set() -> None:
 
 
 def test_threshold_treats_one_half_as_late() -> None:
+    """predicted_late is the 0.5 cut. The score itself is not treated as a calibrated probability."""
     assert predicted_late(0.5) is True
     assert predicted_late(0.49) is False
 
 
 def test_cancelled_and_unknown_with_arrival_are_not_trained(monkeypatch) -> None:
+    """Cancelled and unknown rows are not labels, even when they have an arrival."""
     start = datetime(2024, 1, 1)
     rows = [
         _row(f"S{index}", start + timedelta(days=index), 30.0 if index % 2 else 1.0)
@@ -78,6 +86,7 @@ def test_cancelled_and_unknown_with_arrival_are_not_trained(monkeypatch) -> None
     seen: list[str] = []
 
     def spy(row: dict[str, object]) -> dict[str, object]:
+        """Record which ids the fit actually turns into features."""
         seen.append(str(row["shipment_id"]))
         return shipment_features(row)
 
@@ -88,6 +97,7 @@ def test_cancelled_and_unknown_with_arrival_are_not_trained(monkeypatch) -> None
 
 
 def test_unseen_port_returns_a_score() -> None:
+    """A port code absent from training still scores. The one-hot encoder ignores it instead of raising."""
     start = datetime(2024, 1, 1)
     rows = []
     for index in range(12):

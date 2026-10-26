@@ -1,3 +1,9 @@
+"""HTTP tests against a real uvicorn process and Postgres.
+
+Covers a successful shipment lookup, a 404, the DQ report, and predict-delay,
+plus the filters, the JSON access log, and a missing model.
+"""
+
 import json
 import os
 import socket
@@ -19,18 +25,21 @@ RAW = ROOT / "data" / "raw"
 
 
 def _free_port() -> int:
+    """An unused local port so two test runs do not fight over 8000."""
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
 
 
 def _drain(pipe, bucket: list[str]) -> None:
+    """Copy the server's stdout into a list so a test can read the access log."""
     for line in pipe:
         bucket.append(line)  # noqa: PERF402 — this streams a pipe, it does not copy a list
 
 
 @pytest.fixture(scope="module")
 def database_url() -> str:
+    """Seed Postgres once for this module. Fails if DATABASE_URL is unset."""
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL is unset")
@@ -39,6 +48,7 @@ def database_url() -> str:
 
 
 def _start_server(database_url: str, model_path: str) -> tuple[str, subprocess.Popen[str], list[str]]:
+    """Start uvicorn the way a reviewer would, and wait until GET /health answers."""
     port = _free_port()
     env = os.environ.copy()
     env.update(
@@ -89,6 +99,7 @@ def _start_server(database_url: str, model_path: str) -> tuple[str, subprocess.P
 
 @pytest.fixture(scope="module")
 def server(database_url: str):
+    """A running API with the committed delay model loaded at startup."""
     url, proc, stdout = _start_server(
         database_url,
         str(ROOT / "models" / "delay_model.joblib"),
@@ -100,6 +111,7 @@ def server(database_url: str):
 
 @pytest.fixture(scope="module")
 def server_without_model(database_url: str):
+    """A running API whose MODEL_PATH does not exist, so predict must return 503."""
     url, proc, _stdout = _start_server(database_url, str(ROOT / "models" / "missing.joblib"))
     yield url
     proc.terminate()
@@ -107,6 +119,7 @@ def server_without_model(database_url: str):
 
 
 def test_shipment_lookup_unknown_and_quarantine(server, database_url: str) -> None:
+    """A real shipment returns 200. An unknown id and a quarantined id return 404 JSON."""
     url, _stdout = server
     found = httpx.get(f"{url}/shipments/SHP-00623", timeout=10)
     assert found.status_code == 200
@@ -124,6 +137,7 @@ def test_shipment_lookup_unknown_and_quarantine(server, database_url: str) -> No
 
 
 def test_route_stats_and_unknown_port(server) -> None:
+    """Route stats return average delay, on-time rate, and count. An unknown port is 404."""
     url, _stdout = server
     stats = httpx.get(f"{url}/routes/Shanghai/Rotterdam/stats", timeout=10)
     assert stats.status_code == 200
@@ -139,6 +153,7 @@ def test_route_stats_and_unknown_port(server) -> None:
 
 
 def test_quality_report(server) -> None:
+    """GET /data-quality/report returns the DQ checks as JSON."""
     url, _stdout = server
     response = httpx.get(f"{url}/data-quality/report", timeout=30)
     assert response.status_code == 200
@@ -148,6 +163,7 @@ def test_quality_report(server) -> None:
 
 
 def test_validation_errors_share_one_shape(server) -> None:
+    """A bad query and a bad predict body are both 422 with code and message."""
     url, _stdout = server
     for params in (
         {"limit": 201},
@@ -162,6 +178,7 @@ def test_validation_errors_share_one_shape(server) -> None:
 
 
 def test_booking_filter_is_inclusive_and_offset_past_the_end_keeps_total(server) -> None:
+    """GET /shipments filters by origin, destination, status, and an inclusive booking range, and paginates."""
     url, _stdout = server
     booking = "2024-08-13 09:00:00"
     matched = httpx.get(
@@ -199,6 +216,7 @@ def test_booking_filter_is_inclusive_and_offset_past_the_end_keeps_total(server)
 
 
 def test_request_log_is_json(server) -> None:
+    """The access line is JSON with method, path, status code, and latency."""
     url, stdout = server
     httpx.get(f"{url}/health", timeout=10)
     deadline = time.time() + 5
@@ -210,6 +228,7 @@ def test_request_log_is_json(server) -> None:
 
 
 def test_top_routes_honors_origin(database_url: str) -> None:
+    """The assistant ranking query keeps the origin filter and uses the latest booking quarter."""
     from datetime import datetime
 
     from sqlalchemy import func
@@ -238,6 +257,7 @@ def test_top_routes_honors_origin(database_url: str) -> None:
 
 
 def test_timezone_offset_is_rejected(server) -> None:
+    """A booking filter with a timezone offset is 422. The files have no offset."""
     url, _stdout = server
     response = httpx.get(
         f"{url}/shipments",
@@ -249,6 +269,7 @@ def test_timezone_offset_is_rejected(server) -> None:
 
 
 def test_missing_model_is_503(server_without_model) -> None:
+    """predict-delay with no artefact is 503. The process is still up."""
     response = httpx.post(
         f"{server_without_model}/predict-delay",
         json={"shipment_id": "SHP-00623"},
@@ -259,6 +280,7 @@ def test_missing_model_is_503(server_without_model) -> None:
 
 
 def test_cancelled_shipment_still_receives_a_score(server, database_url: str) -> None:
+    """A cancelled shipment that survived quarantine can still be scored. The model was not trained on cancellations."""
     url, _stdout = server
     with SessionLocal(database_url)() as session:
         cancelled = session.scalars(
